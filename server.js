@@ -480,7 +480,7 @@ async function jamendoSearch(s, query, sort, deadline) {
   return (j.results || []).filter(x => x && x.audio).map(x => ({ title: (String(x.name || '') + (x.artist_name ? ' - ' + x.artist_name : '')).replace(/\s+/g, ' ').trim().slice(0, 100), url: String(x.audio), src: 'jamendo' })).filter(x => x.title);
 }
 const decodeHtml = s => String(s || '').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n))).replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#038;/g, '&');
-async function kcmSearch(query, deadline) {
+async function kcmFetch(query, deadline) {
   const u = new URL('https://kcm.fm/wp-json/wp/v2/posts');
   u.searchParams.set('categories', '1521');
   u.searchParams.set('per_page', '15');
@@ -503,6 +503,20 @@ async function kcmSearch(query, deadline) {
   }
   if (words.length) out.sort((a, b) => b.score - a.score);
   return out.slice(0, 6).map(({ title, url, src }) => ({ title, url, src }));
+}
+async function kcmSearch(query, deadline) {
+  let out = await kcmFetch(query, deadline);
+  if (out.length || !query) return out;
+  const variants = [
+    query.replace(/([א-ת])וו/g, '$1עוו'),
+    query.replace(/עוו/g, 'וו'),
+    query.replace(/([א-ת])לעך\b/g, '$1לך').replace(/([א-ת])לך\b/g, '$1עלעך')
+  ].filter((v, i, a) => v !== query && a.indexOf(v) === i);
+  for (const v of variants) {
+    out = await kcmFetch(v, deadline);
+    if (out.length) return out;
+  }
+  return [];
 }
 async function searchMedia(s, query, deadline, sort) {
   query = String(query || '').trim().slice(0, 200);
