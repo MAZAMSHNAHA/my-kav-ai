@@ -67,7 +67,7 @@ const MEDIA_MAX_SEC = (parseInt(process.env.MEDIA_MAX_MIN, 10) || 20) * 60;
 const MEDIA_MAX_BYTES = (parseInt(process.env.MEDIA_MAX_MB, 10) || 100) * 1048576;
 const MEDIA_PREP_MS = Number(process.env.MEDIA_PREP_MS) || 100000;
 const MEDIA_HINT = ' יש לך קבצי שמע שאפשר להשמיע למתקשר. הפעל את הכלי play_media אך ורק אם המשתמש ביקש במפורש לנגן או להשמיע קובץ, והעבר את מספר הקובץ מהרשימה. אם יש רק קובץ אחד והמשתמש ביקש לנגן את הקובץ, הפעל אותו. הקבצים: ' + MEDIA.map((m, i) => (i + 1) + ' ' + m.n).join(', ') + '. אחרי שהפעלת את הכלי ענה במשפט קצר אחד בלבד שאתה מנגן עכשיו את הקובץ, בלי להקריא כתובות.';
-const EMAIL_HINT = ' יש לך כלי חיפוש במייל האישי של המתקשר בשם search_email. הפעל אותו אך ורק כשהמשתמש מבקש במפורש לבדוק, לחפש או לקרוא מהמייל שלו, למשל מה יש לי במייל, חפש במייל מ..., או האם קיבלתי מייל מ.... אם הכלי מחזיר שגיאה שהמספר לא מורשה, אמור בנימוס שהגישה למייל חסומה למספר זה. אחרי החיפוש סכם בקצרה ובשפה ברורה את המיילים שנמצאו: שולח, נושא, תאריך ותמצית התוכן, בלי להקריא כתובות מייל ארוכות או קישורים טכניים אלא אם התבקשת.';
+const EMAIL_HINT = ' יש לך כלי חיפוש במייל האישי של המתקשר בשם search_email. הפעל אותו אך ורק כשהמשתמש מבקש במפורש לבדוק, לחפש או לקרוא מהמייל שלו, למשל מה יש לי במייל, חפש במייל מ..., או האם קיבלתי מייל מ.... ברירת המחדל היא תיבת ראשי (primary); אם המשתמש מבקש במפורש לבדוק בעדכונים, בקידומי מכירות או בכל המייל, העבר category מתאים. אם הכלי מחזיר שגיאה שהמספר לא מורשה, אמור בנימוס שהגישה למייל חסומה למספר זה. אחרי החיפוש סכם בקצרה ובשפה ברורה את המיילים שנמצאו (מהחדש לישן): שולח, נושא, תאריך ותמצית התוכן, בלי להקריא כתובות מייל ארוכות או קישורים טכניים אלא אם התבקשת.';
 // history is kept as text only, so a recorded question needs a transcript: the model adds it as a tag that the server strips
 const TRANSCRIBE_HINT = ' אם השאלה הגיעה כהקלטה קולית, התחל את התשובה בתג [[Q:תמלול מדויק של השאלה במילים]] ואחריו התשובה עצמה. לשאלה שהוקלדה אל תוסיף את התג. לעולם אל תזכיר את התג בטקסט אחר.';
 // detailed answers like Gemini: whatever MAX_WORDS says, the limit is never lower than 500 words
@@ -271,6 +271,7 @@ const EMAIL_SEARCH_DECL = {
     properties: {
       query: { type: 'STRING', description: 'Optional search text to look for in subject or body' },
       from: { type: 'STRING', description: 'Optional sender name or email address filter' },
+      category: { type: 'STRING', description: 'Gmail tab: primary (default, main inbox), updates, promotions, social, or all (all inbox tabs)' },
       limit: { type: 'INTEGER', description: 'Number of recent matching emails to return (default 5, max 10)' }
     }
   }
@@ -293,6 +294,8 @@ async function searchEmail(s, args, deadline) {
   if (!isEmailAllowed(s && s.ph)) return { error: 'unauthorized: caller phone is not in EMAIL_ALLOWED_PHONES' };
   const query = String((args && args.query) || '').trim().slice(0, 150);
   const from = String((args && args.from) || '').trim().slice(0, 100);
+  const catRaw = String((args && args.category) || 'primary').trim().toLowerCase();
+  const category = ['primary', 'updates', 'promotions', 'social', 'all'].includes(catRaw) ? catRaw : 'primary';
   const limit = Math.min(10, Math.max(1, parseInt(args && args.limit, 10) || 5));
   const left = deadline ? deadline - Date.now() : 25000;
   if (left < 2000) { const e = new Error('turn budget exhausted'); e.budget = true; throw e; }
@@ -314,12 +317,23 @@ async function searchEmail(s, args, deadline) {
   try {
     await client.connect();
     lock = await client.getMailboxLock('INBOX', { readOnly: true });
-    const criteria = {};
-    if (from) criteria.from = from;
-    if (query) criteria.text = query;
-    const uids = await client.search(Object.keys(criteria).length ? criteria : { all: true }, { uid: true });
-    if (!uids || !uids.length) return { count: 0, emails: [] };
-    const picked = uids.slice(-limit).reverse();
+    let searchCriteria;
+    if (client.capabilities && client.capabilities.has('X-GM-EXT-1')) {
+      const parts = ['in:inbox'];
+      if (category !== 'all') parts.push('category:' + category);
+      if (from) parts.push('from:(' + from.replace(/[()"]/g, ' ') + ')');
+      if (query) parts.push(query.replace(/"/g, ' '));
+      searchCriteria = { gmailRaw: parts.join(' ') };
+    } else {
+      const criteria = {};
+      if (from) criteria.from = from;
+      if (query) criteria.text = query;
+      searchCriteria = Object.keys(criteria).length ? criteria : { all: true };
+    }
+    const uids = await client.search(searchCriteria, { uid: true });
+    if (!uids || !uids.length) return { count: 0, category, emails: [] };
+    uids.sort((a, b) => a - b);
+    const picked = uids.slice(-limit);
     const emails = [];
     for await (const msg of client.fetch(picked, { uid: true, envelope: true, source: true }, { uid: true })) {
       const env = msg.envelope || {};
@@ -334,15 +348,18 @@ async function searchEmail(s, args, deadline) {
           console.error('email parse failed:', String(pe.message).slice(0, 100));
         }
       }
+      const ts = env.date ? new Date(env.date).getTime() : 0;
       emails.push({
+        ts,
         from: fromStr.trim(),
         subject: String(env.subject || '(ללא נושא)').trim(),
-        date: env.date ? new Date(env.date).toISOString().slice(0, 16).replace('T', ' ') : '',
+        date: ts ? new Date(ts).toISOString().slice(0, 16).replace('T', ' ') : '',
         body: snippet
       });
     }
-    emails.reverse();
-    return { count: emails.length, emails };
+    emails.sort((a, b) => b.ts - a.ts);
+    emails.forEach(e => { delete e.ts; });
+    return { count: emails.length, category, emails };
   } catch (e) {
     console.error('email search failed:', String(e.message).slice(0, 150));
     return { error: 'email search failed: ' + String(e.message).slice(0, 80) };
