@@ -21,8 +21,8 @@ const HAS_SEARCH = GROQ_KEYS.length > 0;
 // Jamendo: free music API (full songs, free license); register at developer.jamendo.com for a client id
 const JAMENDO_ID = String(process.env.JAMENDO_CLIENT_ID || '').trim();
 const JAMENDO_BASE = process.env.JAMENDO_BASE || 'https://api.jamendo.com/v3.0';
-// songs can be searched with Jamendo or, as a backup, with the web search of Groq
-const HAS_FOUND = !!JAMENDO_ID || HAS_SEARCH;
+// songs can be searched on Kol Chai Music (kcm.fm), Jamendo, or as a backup with Groq web search
+const HAS_FOUND = true;
 // personal email search via IMAP (e.g. Gmail with App Password); restricted to EMAIL_ALLOWED_PHONES
 const EMAIL_USER = String(process.env.EMAIL_USER || '').trim();
 const EMAIL_PASS = String(process.env.EMAIL_PASS || '').trim();
@@ -378,26 +378,31 @@ async function prepareMedia(m, d, dl0) {
   const dl = dl0 || Date.now() + MEDIA_PREP_MS;
   const tmp = path.join(os.tmpdir(), name + '-' + crypto.randomBytes(3).toString('hex'));
   try {
-    const r = await http(m.u, { redirect: 'follow' }, 60000, dl);
-    if (!r.ok) throw new Error('media download ' + r.status);
-    if (Number(r.headers.get('content-length') || 0) > MEDIA_MAX_BYTES) throw new Error('media file too large');
-    const out = fs.createWriteStream(tmp + '.in');
-    const reader = r.body.getReader();
-    let got = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      got += value.length;
-      if (got > MEDIA_MAX_BYTES) { reader.cancel().catch(() => {}); throw new Error('media file too large'); }
-      if (!out.write(value)) await new Promise(res => out.once('drain', res));
-    }
-    await new Promise((res, rej) => out.end(e => (e ? rej(e) : res())));
     let buf;
-    if (FFMPEG) {
-      await execFileP(FFMPEG, ['-y', '-v', 'error', '-i', tmp + '.in', '-vn', '-t', String(MEDIA_MAX_SEC), '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', tmp + '.wav'], { timeout: Math.max(5000, dl - Date.now()) });
+    if (FFMPEG && /\.m3u8(\?|$)/i.test(m.u)) {
+      await execFileP(FFMPEG, ['-y', '-v', 'error', '-i', m.u, '-vn', '-t', String(MEDIA_MAX_SEC), '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', tmp + '.wav'], { timeout: Math.max(5000, dl - Date.now()) });
       buf = fs.readFileSync(tmp + '.wav');
     } else {
-      buf = fs.readFileSync(tmp + '.in'); // no ffmpeg: Yemot converts the upload itself (works for mp3 and wav)
+      const r = await http(m.u, { redirect: 'follow' }, 60000, dl);
+      if (!r.ok) throw new Error('media download ' + r.status);
+      if (Number(r.headers.get('content-length') || 0) > MEDIA_MAX_BYTES) throw new Error('media file too large');
+      const out = fs.createWriteStream(tmp + '.in');
+      const reader = r.body.getReader();
+      let got = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        got += value.length;
+        if (got > MEDIA_MAX_BYTES) { reader.cancel().catch(() => {}); throw new Error('media file too large'); }
+        if (!out.write(value)) await new Promise(res => out.once('drain', res));
+      }
+      await new Promise((res, rej) => out.end(e => (e ? rej(e) : res())));
+      if (FFMPEG) {
+        await execFileP(FFMPEG, ['-y', '-v', 'error', '-i', tmp + '.in', '-vn', '-t', String(MEDIA_MAX_SEC), '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', tmp + '.wav'], { timeout: Math.max(5000, dl - Date.now()) });
+        buf = fs.readFileSync(tmp + '.wav');
+      } else {
+        buf = fs.readFileSync(tmp + '.in'); // no ffmpeg: Yemot converts the upload itself (works for mp3 and wav)
+      }
     }
     await upload(name, buf, dl, d, 60000);
     mediaDone[key] = true;
@@ -474,8 +479,36 @@ async function jamendoSearch(s, query, sort, deadline) {
   if (!r.ok || !j.headers || j.headers.status !== 'success') throw new Error('jamendo ' + r.status + ' ' + JSON.stringify(j.headers || {}).slice(0, 120));
   return (j.results || []).filter(x => x && x.audio).map(x => ({ title: (String(x.name || '') + (x.artist_name ? ' - ' + x.artist_name : '')).replace(/\s+/g, ' ').trim().slice(0, 100), url: String(x.audio), src: 'jamendo' })).filter(x => x.title);
 }
+const decodeHtml = s => String(s || '').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n))).replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#038;/g, '&');
+async function kcmSearch(query, deadline) {
+  const u = new URL('https://kcm.fm/wp-json/wp/v2/posts');
+  u.searchParams.set('categories', '1521');
+  u.searchParams.set('per_page', '12');
+  if (query) u.searchParams.set('search', query);
+  const r = await http(u.toString(), { headers: { 'User-Agent': 'Mozilla/5.0' } }, 15000, deadline);
+  if (!r.ok) throw new Error('kcm ' + r.status);
+  const posts = await r.json();
+  if (!Array.isArray(posts)) return [];
+  const out = [];
+  for (const p of posts) {
+    const title = decodeHtml((p && p.title && p.title.rendered) || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 100);
+    const audio1 = (p && Array.isArray(p.audios_in_content) && p.audios_in_content[0] && p.audios_in_content[0].audio_file) || '';
+    const audio2 = (p && p.acf && p.acf.video_data && p.acf.video_data.video_scr) || '';
+    const url = [audio1, audio2].find(x => /^https?:\/\//i.test(String(x || '').trim())) || '';
+    if (title && url) out.push({ title, url: String(url).trim(), src: 'kcm' });
+    if (out.length >= 6) break;
+  }
+  return out;
+}
 async function searchMedia(s, query, deadline, sort) {
   query = String(query || '').trim().slice(0, 200);
+  try {
+    s.found = await kcmSearch(query, deadline);
+    if (s.found.length) return { results: s.found.map((x, i) => ({ number: i + 1, title: x.title })) };
+  } catch (e) {
+    if (isBudget(e)) throw e;
+    console.error('kcm search failed:', String(e.message).slice(0, 150));
+  }
   if (JAMENDO_ID) {
     try {
       s.found = await jamendoSearch(s, query, sort, deadline);
@@ -487,7 +520,7 @@ async function searchMedia(s, query, deadline, sort) {
       if (!GROQ_KEYS.length) return { error: 'search unavailable' };
     }
   }
-  if (!query || !GROQ_KEYS.length) return { error: 'search unavailable' };
+  if (!query || !GROQ_KEYS.length) return { error: 'nothing found' };
   try {
     const t = await groqText(MEDIA_JSON_SYS + 'Return up to 6 results for the request. title = the song or file name (with the artist when known), in its original language. url = a direct link to an audio or video file (mp3, m4a, mp4, wav) when you found one, otherwise an empty string.', query, deadline, 35000);
     const items = parseList(t).map(x => ({ title: String((x && x.title) || '').replace(/\s+/g, ' ').trim().slice(0, 100), url: /^https?:\/\//i.test(String((x && x.url) || '')) ? String(x.url).trim() : '' })).filter(x => x.title);
