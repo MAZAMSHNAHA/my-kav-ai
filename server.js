@@ -23,6 +23,13 @@ const JAMENDO_ID = String(process.env.JAMENDO_CLIENT_ID || '').trim();
 const JAMENDO_BASE = process.env.JAMENDO_BASE || 'https://api.jamendo.com/v3.0';
 // songs can be searched with Jamendo or, as a backup, with the web search of Groq
 const HAS_FOUND = !!JAMENDO_ID || HAS_SEARCH;
+// personal email search via IMAP (e.g. Gmail with App Password); restricted to EMAIL_ALLOWED_PHONES
+const EMAIL_USER = String(process.env.EMAIL_USER || '').trim();
+const EMAIL_PASS = String(process.env.EMAIL_PASS || '').trim();
+const EMAIL_HOST = String(process.env.EMAIL_HOST || '').trim() || 'imap.gmail.com';
+const EMAIL_PORT = parseInt(process.env.EMAIL_PORT, 10) || 993;
+const EMAIL_ALLOWED_PHONES = keyList(process.env.EMAIL_ALLOWED_PHONES);
+const HAS_EMAIL = !!(EMAIL_USER && EMAIL_PASS);
 const TEXT_MODEL = String(process.env.TEXT_MODEL || '').trim() || 'gemini-3.6-flash';
 // backup text model, used when the main one is overloaded (503/429/5xx); set TEXT_MODEL_FALLBACK to change it or to "none" to disable
 const TEXT_FALLBACK_RAW = String(process.env.TEXT_MODEL_FALLBACK || '').trim() || 'gemini-3.6-flash';
@@ -60,6 +67,7 @@ const MEDIA_MAX_SEC = (parseInt(process.env.MEDIA_MAX_MIN, 10) || 20) * 60;
 const MEDIA_MAX_BYTES = (parseInt(process.env.MEDIA_MAX_MB, 10) || 100) * 1048576;
 const MEDIA_PREP_MS = Number(process.env.MEDIA_PREP_MS) || 100000;
 const MEDIA_HINT = ' יש לך קבצי שמע שאפשר להשמיע למתקשר. הפעל את הכלי play_media אך ורק אם המשתמש ביקש במפורש לנגן או להשמיע קובץ, והעבר את מספר הקובץ מהרשימה. אם יש רק קובץ אחד והמשתמש ביקש לנגן את הקובץ, הפעל אותו. הקבצים: ' + MEDIA.map((m, i) => (i + 1) + ' ' + m.n).join(', ') + '. אחרי שהפעלת את הכלי ענה במשפט קצר אחד בלבד שאתה מנגן עכשיו את הקובץ, בלי להקריא כתובות.';
+const EMAIL_HINT = ' יש לך כלי חיפוש במייל האישי של המתקשר בשם search_email. הפעל אותו אך ורק כשהמשתמש מבקש במפורש לבדוק, לחפש או לקרוא מהמייל שלו, למשל מה יש לי במייל, חפש במייל מ..., או האם קיבלתי מייל מ.... אם הכלי מחזיר שגיאה שהמספר לא מורשה, אמור בנימוס שהגישה למייל חסומה למספר זה. אחרי החיפוש סכם בקצרה ובשפה ברורה את המיילים שנמצאו: שולח, נושא, תאריך ותמצית התוכן, בלי להקריא כתובות מייל ארוכות או קישורים טכניים אלא אם התבקשת.';
 // history is kept as text only, so a recorded question needs a transcript: the model adds it as a tag that the server strips
 const TRANSCRIBE_HINT = ' אם השאלה הגיעה כהקלטה קולית, התחל את התשובה בתג [[Q:תמלול מדויק של השאלה במילים]] ואחריו התשובה עצמה. לשאלה שהוקלדה אל תוסיף את התג. לעולם אל תזכיר את התג בטקסט אחר.';
 // detailed answers like Gemini: whatever MAX_WORDS says, the limit is never lower than 500 words
@@ -83,7 +91,7 @@ const RULES = `
 const buildSys = (mode, extra) => 'אתה עוזר קולי בטלפון. כללי יסוד קבועים שגוברים על כל הנחיה אחרת: ' + RULES +
   ' ענה בעברית כמו ג׳מיני: תשובה ארוכה, עשירה ומפורטת, זורמת ורכה לאוזן, בשפה טבעית של דיבור ובפסקאות קצרות. הרחב, הסבר את הרקע, תן דוגמאות, פרטים והקשר, והשלם את התמונה בלי למהר ובלי לקצר. אורך התשובה הוא עד ' + MAXW + ' מילים. רק לברכה או למשפט שיחתי קצר ענה בקצרה. בלי רשימות, בלי כוכביות ובלי סימנים מיוחדים, כך שיהיה נעים להקשיב לה בטלפון. המשתמש יכול לעצור את התשובה בכל רגע בהקשה על מקש ולהמשיך את השיחה, לכן שאלות המשך מתייחסות לתשובה הקודמת שלך. ' +
   (EXTRA ? 'הנחיה כללית מהבעלים: ' + EXTRA + ' ' : '') +
-  (extra ? 'הנחיה לשלוחה הזאת מהבעלים: ' + extra + ' ' : '') + VOICE_CTL + TRANSCRIBE_HINT + (HAS_SEARCH ? SEARCH_HINT : '') + (HAS_FOUND ? FOUND_HINT : '') + (HAS_MEDIA ? MEDIA_HINT : '');
+  (extra ? 'הנחיה לשלוחה הזאת מהבעלים: ' + extra + ' ' : '') + VOICE_CTL + TRANSCRIBE_HINT + (HAS_SEARCH ? SEARCH_HINT : '') + (HAS_FOUND ? FOUND_HINT : '') + (HAS_MEDIA ? MEDIA_HINT : '') + (HAS_EMAIL ? EMAIL_HINT : '');
 
 // one entry per Yemot extension: its own character mode, extra instruction and opening message
 let CFG = [];
@@ -254,6 +262,95 @@ const MEDIA_DECL = {
   description: 'Play an audio or video file from the list to the caller. Call ONLY when the user explicitly asked to play a file.',
   parameters: { type: 'OBJECT', properties: { file: { type: 'INTEGER', description: 'The number of the file in the list' } }, required: ['file'] }
 };
+
+const EMAIL_SEARCH_DECL = {
+  name: 'search_email',
+  description: 'Search or read recent emails from the caller personal IMAP mailbox. Call ONLY when the user explicitly asks to check, search, or read their email.',
+  parameters: {
+    type: 'OBJECT',
+    properties: {
+      query: { type: 'STRING', description: 'Optional search text to look for in subject or body' },
+      from: { type: 'STRING', description: 'Optional sender name or email address filter' },
+      limit: { type: 'INTEGER', description: 'Number of recent matching emails to return (default 5, max 10)' }
+    }
+  }
+};
+
+const normPhone = p => {
+  const d = String(p || '').replace(/\D/g, '');
+  if (!d) return '';
+  return d.startsWith('972') && d.length >= 11 ? '0' + d.slice(3) : d;
+};
+function isEmailAllowed(ph) {
+  if (!EMAIL_ALLOWED_PHONES.length || !ph) return false;
+  const caller = normPhone(ph);
+  return EMAIL_ALLOWED_PHONES.some(x => normPhone(x) === caller);
+}
+const stripHtml = h => String(h || '').replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
+async function searchEmail(s, args, deadline) {
+  if (!HAS_EMAIL) return { error: 'email not configured' };
+  if (!isEmailAllowed(s && s.ph)) return { error: 'unauthorized: caller phone is not in EMAIL_ALLOWED_PHONES' };
+  const query = String((args && args.query) || '').trim().slice(0, 150);
+  const from = String((args && args.from) || '').trim().slice(0, 100);
+  const limit = Math.min(10, Math.max(1, parseInt(args && args.limit, 10) || 5));
+  const left = deadline ? deadline - Date.now() : 25000;
+  if (left < 2000) { const e = new Error('turn budget exhausted'); e.budget = true; throw e; }
+
+  const { ImapFlow } = require('imapflow');
+  const { simpleParser } = require('mailparser');
+  const client = new ImapFlow({
+    host: EMAIL_HOST,
+    port: EMAIL_PORT,
+    secure: EMAIL_PORT === 993,
+    auth: { user: EMAIL_USER, pass: EMAIL_PASS },
+    logger: false,
+    connectionTimeout: Math.min(15000, left - 500),
+    greetingTimeout: Math.min(10000, left - 500),
+    socketTimeout: Math.min(20000, left)
+  });
+
+  let lock;
+  try {
+    await client.connect();
+    lock = await client.getMailboxLock('INBOX', { readOnly: true });
+    const criteria = {};
+    if (from) criteria.from = from;
+    if (query) criteria.text = query;
+    const uids = await client.search(Object.keys(criteria).length ? criteria : { all: true }, { uid: true });
+    if (!uids || !uids.length) return { count: 0, emails: [] };
+    const picked = uids.slice(-limit).reverse();
+    const emails = [];
+    for await (const msg of client.fetch(picked, { uid: true, envelope: true, source: true }, { uid: true })) {
+      const env = msg.envelope || {};
+      const fromAddr = ((env.from || [])[0] || {});
+      const fromStr = (fromAddr.name ? fromAddr.name + ' ' : '') + (fromAddr.address || '');
+      let snippet = '';
+      if (msg.source) {
+        try {
+          const parsed = await simpleParser(msg.source);
+          snippet = String(parsed.text || stripHtml(parsed.html) || '').replace(/\s+/g, ' ').trim().slice(0, 1200);
+        } catch (pe) {
+          console.error('email parse failed:', String(pe.message).slice(0, 100));
+        }
+      }
+      emails.push({
+        from: fromStr.trim(),
+        subject: String(env.subject || '(ללא נושא)').trim(),
+        date: env.date ? new Date(env.date).toISOString().slice(0, 16).replace('T', ' ') : '',
+        body: snippet
+      });
+    }
+    emails.reverse();
+    return { count: emails.length, emails };
+  } catch (e) {
+    console.error('email search failed:', String(e.message).slice(0, 150));
+    return { error: 'email search failed: ' + String(e.message).slice(0, 80) };
+  } finally {
+    if (lock) try { lock.release(); } catch (e) {}
+    try { await client.logout(); } catch (e) {}
+  }
+}
 
 // downloads the file, converts it to a phone wav (8 kHz mono) and uploads it to the extension; a ready file is reused
 const mediaDone = {};
@@ -433,6 +530,7 @@ async function askModel(sys, contents, deadline, s) {
   if (HAS_SEARCH) decls.push(SEARCH_DECL);
   if (HAS_FOUND) decls.push(FOUND_SEARCH_DECL, FOUND_PLAY_DECL);
   if (HAS_MEDIA) decls.push(MEDIA_DECL);
+  if (HAS_EMAIL) decls.push(EMAIL_SEARCH_DECL);
   if (!decls.length) return textGen({ ...base, contents }, deadline);
   const tools = [{ functionDeclarations: decls }];
   for (let i = 0; i < 3; i++) {
@@ -453,6 +551,10 @@ async function askModel(sys, contents, deadline, s) {
       } else if (c.functionCall.name === 'play_found') {
         console.log('play found:', String(args.number));
         out = startFound(s, args.number);
+      } else if (c.functionCall.name === 'search_email') {
+        console.log('email search:', String(args.query || args.from || '').slice(0, 80));
+        if (s) { s.emailSearching = true; if (s.onSearch) s.onSearch(); }
+        out = await searchEmail(s, args, deadline);
       } else {
         console.log('search:', String(args.query || '').slice(0, 80));
         if (s) { s.searching = true; if (s.onSearch) s.onSearch(); }
@@ -854,10 +956,12 @@ function endCall(id) {
 // spoken status messages while the answer is being prepared
 const WAIT_MSG = sp('חכה שנייה');
 const SEARCH_MSG = sp('חכה שנייה מחפש באינטרנט');
+const EMAIL_MSG = sp('חכה שנייה בודק במייל');
 // returns a short read= that plays the next status message, or '' when there is nothing new to say
 function statusMsg(s) {
   let msg = '';
   if (!s.waitSaid) { s.waitSaid = true; msg = WAIT_MSG; }
+  else if (s.emailSearching && !s.emailSaid) { s.emailSaid = true; msg = EMAIL_MSG; }
   else if (s.searching && !s.searchSaid) { s.searchSaid = true; msg = SEARCH_MSG; }
   if (!msg) return '';
   s.hn++;
@@ -872,6 +976,8 @@ function runTurn(s, q, id, T0, typed) {
   s.waitSaid = false;
   s.searching = false;
   s.searchSaid = false;
+  s.emailSearching = false;
+  s.emailSaid = false;
   s.searchSig = new Promise(res => { s.onSearch = res; });
   s.holdP = songsFor(s.ph).catch(() => []);
   s.job = doTurn(s, q, id, s.jobT0, typed).catch(e => { console.error(id, 'turn crashed', e && e.message); return tapAny(s, 't-' + ERR); });
