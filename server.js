@@ -541,28 +541,38 @@ async function kcmFetch(query, deadline) {
   if (words.length) out.sort((a, b) => b.score - a.score);
   return out.slice(0, 6).map(({ title, url, src }) => ({ title, url, src }));
 }
+const cleanSongQuery = q => String(q || '').replace(/(?:^|\s)(השיר|שיר|הניגון|ניגון|הקליפ|קליפ|של|את)(?=\s|$)/g, ' ').replace(/\s+/g, ' ').trim();
 async function kcmSearch(query, deadline) {
-  let out = await kcmFetch(query, deadline);
-  if (out.length || !query) return out;
+  const q = cleanSongQuery(query);
+  let out = await kcmFetch(q, deadline);
+  if (out.length || !q) return out;
   const variants = [
-    query.replace(/([א-ת])וו/g, '$1עוו'),
-    query.replace(/עוו/g, 'וו'),
-    query.replace(/([א-ת])לעך\b/g, '$1לך').replace(/([א-ת])לך\b/g, '$1עלעך')
-  ].filter((v, i, a) => v !== query && a.indexOf(v) === i);
+    q.replace(/([א-ת])וו/g, '$1עוו'),
+    q.replace(/עוו/g, 'וו'),
+    q.replace(/([א-ת])לעך\b/g, '$1לך').replace(/([א-ת])לך\b/g, '$1עלעך')
+  ].filter((v, i, a) => v !== q && a.indexOf(v) === i);
   for (const v of variants) {
     out = await kcmFetch(v, deadline);
+    if (out.length) return out;
+  }
+  const words = q.split(/\s+/).filter(w => w.length >= 3);
+  if (words.length > 1) {
+    const longest = words.slice().sort((a, b) => b.length - a.length)[0];
+    out = await kcmFetch(longest, deadline);
     if (out.length) return out;
   }
   return [];
 }
 async function searchMedia(s, query, deadline, sort) {
   query = String(query || '').trim().slice(0, 200);
+  let kcmErr = '';
   try {
     s.found = await kcmSearch(query, deadline);
     if (s.found.length) return { results: s.found.map((x, i) => ({ number: i + 1, title: x.title })) };
   } catch (e) {
     if (isBudget(e)) throw e;
-    console.error('kcm search failed:', String(e.message).slice(0, 150));
+    kcmErr = String(e.message).slice(0, 120);
+    console.error('kcm search failed:', kcmErr);
   }
   if (JAMENDO_ID) {
     try {
@@ -574,7 +584,7 @@ async function searchMedia(s, query, deadline, sort) {
     }
   }
   s.found = [];
-  return { error: 'nothing found' };
+  return { error: kcmErr ? 'search unavailable: ' + kcmErr : 'nothing found' };
 }
 // direct file links for one title (second search, done only when the caller asked to play it)
 async function findMediaUrls(title, deadline) {
@@ -1635,6 +1645,16 @@ app.post('/record', async (req, res) => {
 
 // quick end to end check of the whole chain, without a phone call
 let lastTest = 0;
+app.get('/kcmtest', async (req, res) => {
+  try {
+    const q = String(req.query.q || 'ראטוועט');
+    const results = await kcmSearch(q, Date.now() + 15000);
+    res.json({ ok: true, query: q, count: results.length, results });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message) });
+  }
+});
+
 app.get('/selftest', async (req, res) => {
   res.set('Access-Control-Allow-Origin', '*').type('text/plain; charset=utf-8');
   if (Date.now() - lastTest < 20000) return res.send('ERR נבדק הרגע, חכו 20 שניות ונסו שוב');
