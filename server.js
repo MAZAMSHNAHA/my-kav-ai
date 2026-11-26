@@ -28,6 +28,8 @@ const EMAIL_USER = String(process.env.EMAIL_USER || '').trim();
 const EMAIL_PASS = String(process.env.EMAIL_PASS || '').trim();
 const EMAIL_HOST = String(process.env.EMAIL_HOST || '').trim() || 'imap.gmail.com';
 const EMAIL_PORT = parseInt(process.env.EMAIL_PORT, 10) || 993;
+const SMTP_HOST = String(process.env.SMTP_HOST || '').trim() || (EMAIL_HOST.startsWith('imap.') ? 'smtp.' + EMAIL_HOST.slice(5) : 'smtp.gmail.com');
+const SMTP_PORT = parseInt(process.env.SMTP_PORT, 10) || 465;
 const EMAIL_ALLOWED_PHONES = keyList(process.env.EMAIL_ALLOWED_PHONES);
 const HAS_EMAIL = !!(EMAIL_USER && EMAIL_PASS);
 const TEXT_MODEL = String(process.env.TEXT_MODEL || '').trim() || 'gemini-3.6-flash';
@@ -67,7 +69,7 @@ const MEDIA_MAX_SEC = (parseInt(process.env.MEDIA_MAX_MIN, 10) || 20) * 60;
 const MEDIA_MAX_BYTES = (parseInt(process.env.MEDIA_MAX_MB, 10) || 100) * 1048576;
 const MEDIA_PREP_MS = Number(process.env.MEDIA_PREP_MS) || 100000;
 const MEDIA_HINT = ' יש לך קבצי שמע שאפשר להשמיע למתקשר. הפעל את הכלי play_media אך ורק אם המשתמש ביקש במפורש לנגן או להשמיע קובץ, והעבר את מספר הקובץ מהרשימה. אם יש רק קובץ אחד והמשתמש ביקש לנגן את הקובץ, הפעל אותו. הקבצים: ' + MEDIA.map((m, i) => (i + 1) + ' ' + m.n).join(', ') + '. אחרי שהפעלת את הכלי ענה במשפט קצר אחד בלבד שאתה מנגן עכשיו את הקובץ, בלי להקריא כתובות.';
-const EMAIL_HINT = ' יש לך כלי חיפוש במייל האישי של המתקשר בשם search_email. הפעל אותו אך ורק אם המשתמש ביקש ממך במפורש לחפש או לבדוק במייל, למשל חפש במייל, תחפש במייל, בדוק במייל, תבדוק במייל או מה יש במייל. אם הוא לא ביקש במפורש לבדוק או לחפש במייל, אל תפעיל את הכלי, ענה מהידע שלך ואמור בקצרה שאתה יכול לבדוק במייל אם יבקשו. ברירת המחדל היא תיבת ראשי (primary); אם המשתמש ביקש במפורש לבדוק בעדכונים, בקידומי מכירות או בכל המייל, העבר category מתאים. אם הכלי מחזיר שגיאה שהמספר לא מורשה, אמור בנימוס שהגישה למייל חסומה למספר זה. אחרי החיפוש סכם בקצרה ובשפה ברורה את המיילים שנמצאו (מהחדש לישן): שולח, נושא, תאריך ותמצית התוכן, בלי להקריא כתובות מייל ארוכות או קישורים טכניים אלא אם התבקשת.';
+const EMAIL_HINT = ' יש לך כלי חיפוש במייל האישי של המתקשר בשם search_email וכלי שליחת מייל בשם send_email. הפעל את search_email אך ורק אם המשתמש ביקש ממך במפורש לחפש או לבדוק במייל, למשל חפש במייל, תחפש במייל, בדוק במייל, תבדוק במייל או מה יש במייל. אם הוא לא ביקש במפורש לבדוק או לחפש במייל, אל תפעיל את הכלי, ענה מהידע שלך ואמור בקצרה שאתה יכול לבדוק במייל אם יבקשו. ברירת המחדל היא תיבת ראשי (primary); אם המשתמש ביקש במפורש לבדוק בעדכונים, בקידומי מכירות או בכל המייל, העבר category מתאים. לגבי send_email: הפעל אותו אך ורק כשהמשתמש ביקש במפורש לשלוח או להשיב למייל, ורק אחרי שהקראת לו בקצרה את הנמען, הנושא ותוכן ההודעה וקיבלת ממנו אישור מפורש לשלוח! לפני האישור אל תשלח — רק הקרא את הפרטים ושאל האם לשלוח. אם הכלי מחזיר שגיאה שהמספר לא מורשה, אמור בנימוס שהגישה למייל חסומה למספר זה. אחרי החיפוש סכם בקצרה ובשפה ברורה את המיילים שנמצאו (מהחדש לישן): שולח, נושא, תאריך ותמצית התוכן, בלי להקריא כתובות מייל ארוכות או קישורים טכניים אלא אם התבקשת.';
 // history is kept as text only, so a recorded question needs a transcript: the model adds it as a tag that the server strips
 const TRANSCRIBE_HINT = ' אם השאלה הגיעה כהקלטה קולית, התחל את התשובה בתג [[Q:תמלול מדויק של השאלה במילים]] ואחריו התשובה עצמה. לשאלה שהוקלדה אל תוסיף את התג. לעולם אל תזכיר את התג בטקסט אחר.';
 // detailed answers like Gemini: whatever MAX_WORDS says, the limit is never lower than 500 words
@@ -366,6 +368,50 @@ async function searchEmail(s, args, deadline) {
   } finally {
     if (lock) try { lock.release(); } catch (e) {}
     try { await client.logout(); } catch (e) {}
+  }
+}
+
+const EMAIL_SEND_DECL = {
+  name: 'send_email',
+  description: 'Send an email from the caller personal mailbox. Call ONLY after the user explicitly asked to send an email AND confirmed the recipient, subject, and message.',
+  parameters: {
+    type: 'OBJECT',
+    properties: {
+      to: { type: 'STRING', description: 'Recipient email address (e.g. name@example.com)' },
+      subject: { type: 'STRING', description: 'Email subject' },
+      body: { type: 'STRING', description: 'Email plain-text body' }
+    },
+    required: ['to', 'subject', 'body']
+  }
+};
+
+async function sendEmail(s, args, deadline) {
+  if (!HAS_EMAIL) return { error: 'email not configured' };
+  if (!isEmailAllowed(s && s.ph)) return { error: 'unauthorized: caller phone is not in EMAIL_ALLOWED_PHONES' };
+  const to = String((args && args.to) || '').trim().slice(0, 200);
+  const subject = String((args && args.subject) || '').trim().slice(0, 200);
+  const body = String((args && args.body) || '').trim().slice(0, 8000);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return { error: 'invalid recipient email address' };
+  if (!subject || !body) return { error: 'subject and body are required' };
+  const left = deadline ? deadline - Date.now() : 20000;
+  if (left < 2000) { const e = new Error('turn budget exhausted'); e.budget = true; throw e; }
+
+  try {
+    const nodemailer = require('nodemailer');
+    const transporter = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_PORT === 465,
+      auth: { user: EMAIL_USER, pass: EMAIL_PASS },
+      connectionTimeout: Math.min(12000, left - 500),
+      greetingTimeout: Math.min(10000, left - 500),
+      socketTimeout: Math.min(15000, left)
+    });
+    await transporter.sendMail({ from: EMAIL_USER, to, subject, text: body });
+    return { status: 'sent', to, subject };
+  } catch (e) {
+    console.error('email send failed:', String(e.message).slice(0, 150));
+    return { error: 'email send failed: ' + String(e.message).slice(0, 80) };
   }
 }
 
@@ -670,7 +716,7 @@ async function askModel(sys, contents, deadline, s) {
   if (HAS_SEARCH) decls.push(SEARCH_DECL);
   if (HAS_FOUND) decls.push(FOUND_SEARCH_DECL, FOUND_PLAY_DECL);
   if (HAS_MEDIA) decls.push(MEDIA_DECL);
-  if (HAS_EMAIL) decls.push(EMAIL_SEARCH_DECL);
+  if (HAS_EMAIL) decls.push(EMAIL_SEARCH_DECL, EMAIL_SEND_DECL);
   if (!decls.length) return textGen({ ...base, contents }, deadline);
   const tools = [{ functionDeclarations: decls }];
   for (let i = 0; i < 3; i++) {
@@ -702,6 +748,10 @@ async function askModel(sys, contents, deadline, s) {
         console.log('email search:', String(args.query || args.from || '').slice(0, 80));
         if (s) { s.emailSearching = true; if (s.onSearch) s.onSearch(); }
         out = await searchEmail(s, args, deadline);
+      } else if (c.functionCall.name === 'send_email') {
+        console.log('email send:', String(args.to || '').slice(0, 80));
+        if (s) { s.emailSending = true; if (s.onSearch) s.onSearch(); }
+        out = await sendEmail(s, args, deadline);
       } else {
         console.log('search:', String(args.query || '').slice(0, 80));
         if (s) { s.searching = true; if (s.onSearch) s.onSearch(); }
@@ -1105,10 +1155,12 @@ function endCall(id) {
 const WAIT_MSG = sp('חכה שנייה');
 const SEARCH_MSG = sp('חכה שנייה מחפש באינטרנט');
 const EMAIL_MSG = sp('חכה שנייה בודק במייל');
+const EMAIL_SEND_MSG = sp('חכה שנייה שולח מייל');
 // returns a short read= that plays the next status message, or '' when there is nothing new to say
 function statusMsg(s) {
   let msg = '';
   if (!s.waitSaid) { s.waitSaid = true; msg = WAIT_MSG; }
+  else if (s.emailSending && !s.emailSendSaid) { s.emailSendSaid = true; msg = EMAIL_SEND_MSG; }
   else if (s.emailSearching && !s.emailSaid) { s.emailSaid = true; msg = EMAIL_MSG; }
   else if (s.searching && !s.searchSaid) { s.searchSaid = true; msg = SEARCH_MSG; }
   if (!msg) return '';
@@ -1126,6 +1178,8 @@ function runTurn(s, q, id, T0, typed) {
   s.searchSaid = false;
   s.emailSearching = false;
   s.emailSaid = false;
+  s.emailSending = false;
+  s.emailSendSaid = false;
   s.searchSig = new Promise(res => { s.onSearch = res; });
   s.holdP = songsFor(s.ph).catch(() => []);
   s.job = doTurn(s, q, id, s.jobT0, typed).catch(e => { console.error(id, 'turn crashed', e && e.message); return tapAny(s, 't-' + ERR); });
