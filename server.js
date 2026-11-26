@@ -32,6 +32,14 @@ const SMTP_HOST = String(process.env.SMTP_HOST || '').trim() || (EMAIL_HOST.star
 const SMTP_PORT = parseInt(process.env.SMTP_PORT, 10) || 465;
 const EMAIL_ALLOWED_PHONES = keyList(process.env.EMAIL_ALLOWED_PHONES);
 const HAS_EMAIL = !!(EMAIL_USER && EMAIL_PASS);
+// personal Google Drive MP3 library (extension 3 / /mymusic)
+const gdriveFolderRaw = String(process.env.GDRIVE_FOLDER_ID || '').trim();
+const gdriveFolderM = gdriveFolderRaw.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+const GDRIVE_FOLDER_ID = gdriveFolderM ? gdriveFolderM[1] : gdriveFolderRaw;
+const GDRIVE_API_KEY = String(process.env.GDRIVE_API_KEY || '').trim();
+const HAS_DRIVE = !!(GDRIVE_FOLDER_ID && GDRIVE_API_KEY);
+const MY_MUSIC_RAW = String(process.env.MY_MUSIC_EXT || '3').replace(/^\/+|\/+$/g, '');
+const MUSIC_EXT = MY_MUSIC_RAW ? '/' + MY_MUSIC_RAW : '';
 const TEXT_MODEL = String(process.env.TEXT_MODEL || '').trim() || 'gemini-3.6-flash';
 // backup text model, used when the main one is overloaded (503/429/5xx); set TEXT_MODEL_FALLBACK to change it or to "none" to disable
 const TEXT_FALLBACK_RAW = String(process.env.TEXT_MODEL_FALLBACK || '').trim() || 'gemini-3.6-flash';
@@ -415,6 +423,44 @@ async function sendEmail(s, args, deadline) {
   }
 }
 
+let drivePool = { t: 0, items: [] };
+async function listDriveMusic(deadline) {
+  if (!HAS_DRIVE) return [];
+  if (Date.now() - drivePool.t < 120000 && drivePool.items.length) return drivePool.items;
+  const u = new URL('https://www.googleapis.com/drive/v3/files');
+  u.searchParams.set('q', `'${GDRIVE_FOLDER_ID}' in parents and trashed = false`);
+  u.searchParams.set('fields', 'files(id,name,mimeType,size)');
+  u.searchParams.set('orderBy', 'name');
+  u.searchParams.set('pageSize', '200');
+  u.searchParams.set('key', GDRIVE_API_KEY);
+  const r = await http(u.toString(), {}, 15000, deadline);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error('gdrive ' + r.status + ' ' + JSON.stringify(j.error || {}).slice(0, 120));
+  const items = (j.files || [])
+    .filter(f => f && f.id && f.name && (String(f.mimeType || '').startsWith('audio/') || String(f.mimeType || '').startsWith('video/') || /\.(mp3|wav|m4a|ogg|aac|mp4|flac)$/i.test(f.name)))
+    .map((f, idx) => ({
+      number: idx + 1,
+      id: f.id,
+      title: String(f.name).replace(/\.[a-z0-9]{2,5}$/i, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100),
+      url: 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(f.id) + '?alt=media&key=' + encodeURIComponent(GDRIVE_API_KEY)
+    }));
+  drivePool = { t: Date.now(), items };
+  return items;
+}
+const DRIVE_PLAY_DECL = {
+  name: 'play_drive',
+  description: 'Play a song by its number from the caller personal Google Drive music library.',
+  parameters: { type: 'OBJECT', properties: { number: { type: 'INTEGER', description: 'The 1-based song number from the personal library list' } }, required: ['number'] }
+};
+function startDrive(s, n) {
+  const item = ((s && s.driveList) || [])[Number(n) - 1];
+  if (!item) return { error: 'no such song number' };
+  s.mediaP = prepareMedia({ n: item.title, u: item.url }, s.d).catch(e => { console.error('drive media failed:', String(e.message).slice(0, 150)); return { error: e.message }; });
+  return { status: 'the song will be played right after your reply', title: item.title };
+}
+const buildDriveSys = list => 'אתה עוזר קולי במאגר השירים האישי של המתקשר. מותר לך להשמיע ולחפש אך ורק מתוך רשימת השירים הבאה מהמאגר שלו (אסור לחפש בשום מקום אחר). כשהמשתמש מבקש שיר, זמר או שואל איזה שירים יש, בדוק ברשימה: אם יש התאמה ברורה, הפעל מיד play_drive עם מספר השיר וענה במשפט קצר אחד שאתה מנגן עכשיו את השיר. אם יש כמה שירים מתאימים, הקרא אותם בקצרה עם מספר במילים ושאל איזה לנגן. אם השיר לא נמצא ברשימה, אמור בקצרה שהוא לא נמצא במאגר האישי. ' +
+  TRANSCRIBE_HINT + ' רשימת השירים במאגר: ' + (list.length ? list.map(x => x.number + ' ' + x.title).join(', ') : 'המאגר ריק');
+
 // downloads the file, converts it to a phone wav (8 kHz mono) and uploads it to the extension; a ready file is reused
 const mediaDone = {};
 async function downloadHls(masterUrl, outFile, deadline) {
@@ -713,10 +759,14 @@ async function takeMedia(s) {
 async function askModel(sys, contents, deadline, s) {
   const base = { systemInstruction: { parts: [{ text: sys }] } };
   const decls = [];
-  if (HAS_SEARCH) decls.push(SEARCH_DECL);
-  if (HAS_FOUND) decls.push(FOUND_SEARCH_DECL, FOUND_PLAY_DECL);
-  if (HAS_MEDIA) decls.push(MEDIA_DECL);
-  if (HAS_EMAIL) decls.push(EMAIL_SEARCH_DECL, EMAIL_SEND_DECL);
+  if (s && s.mm === 'ai') {
+    decls.push(DRIVE_PLAY_DECL);
+  } else {
+    if (HAS_SEARCH) decls.push(SEARCH_DECL);
+    if (HAS_FOUND) decls.push(FOUND_SEARCH_DECL, FOUND_PLAY_DECL);
+    if (HAS_MEDIA) decls.push(MEDIA_DECL);
+    if (HAS_EMAIL) decls.push(EMAIL_SEARCH_DECL, EMAIL_SEND_DECL);
+  }
   if (!decls.length) return textGen({ ...base, contents }, deadline);
   const tools = [{ functionDeclarations: decls }];
   for (let i = 0; i < 3; i++) {
@@ -735,7 +785,10 @@ async function askModel(sys, contents, deadline, s) {
     for (const c of fcalls) {
       const args = c.functionCall.args || {};
       let out;
-      if (c.functionCall.name === 'play_media') {
+      if (c.functionCall.name === 'play_drive') {
+        console.log('drive play:', String(args.number));
+        out = startDrive(s, args.number);
+      } else if (c.functionCall.name === 'play_media') {
         console.log('media:', String(args.file));
         out = startMedia(s, args.file);
       } else if (c.functionCall.name === 'search_media') {
@@ -1136,6 +1189,7 @@ async function turnStep(s, q, id, T0) {
     const d = digitsOf(q[s.p]);
     if (d === '1') { s.miss = 0; return askFor(s, recPre(s)); }
     if (d === '2') { s.miss = 0; s.buf = ''; const help = s.kbSeen ? KB_SHORT : KB_START; s.kbSeen = true; return kbAsk(s, 't-' + help); }
+    if (d === '3' && MUSIC_EXT) { endCall(id); return 'go_to_folder=' + MUSIC_EXT; }
     if (d === '9' && HD) { endCall(id); return 'go_to_folder=' + HD; }
     s.miss = (s.miss || 0) + 1;
     if (s.miss >= 3) return 'id_list_message=t-' + sp('להתראות');
@@ -1696,6 +1750,69 @@ app.all('/history', async (req, res) => {
     return res.send(await historyStep(s, q));
   } catch (e) {
     console.error(id, 'history fatal', e.message);
+    if (!res.headersSent) res.send('id_list_message=t-' + ERR);
+  }
+});
+
+// personal Google Drive MP3 library: point extension 3 (MY_MUSIC_EXT) to https://<your service>/mymusic
+const MM_MENU = sp('מאגר השירים האישי. לחיפוש עם הבינה המלאכותית הקש 1. לבחירה לפי מספר שיר הקש 2. לחזרה הקש 0');
+const MM_NUM_ASK = sp('הקש את מספר השיר ובסיום סולמית. לשמיעת הרשימה הקש אפס ובסיום סולמית');
+const numPrompt = (s, pre) => {
+  s.n++;
+  s.p = 'N' + s.e + s.n;
+  return 'read=' + pre + '=' + s.p + ',no,3,1,15,No,no,no,*,Ok,None';
+};
+app.all('/mymusic', async (req, res) => {
+  const q = { ...req.query, ...req.body };
+  const id = idOf(q);
+  res.type('text/plain');
+  const T0 = Date.now();
+  try {
+    if (q.hangup === 'yes') { endCall(id); return res.send('noop=bye'); }
+    if (!HAS_DRIVE) return res.send('id_list_message=t-' + sp('תיקיית השירים בגוגל דרייב עדיין לא הוגדרה בשרת'));
+    const ext = EXT_FIRST;
+    const s = calls[id] || (calls[id] = newSession(ext.d, '', '', { ph: phoneOf(q), mm: '' }));
+    s.t = Date.now();
+    if (!s.mm) {
+      s.mm = 'menu';
+      Promise.race([ensureBeep(s.d), sleep(4000).then(() => false)]).catch(() => {});
+      return res.send(tapFor(s, 't-' + MM_MENU));
+    }
+    if (s.mm === 'menu') {
+      const d = digitsOf(q[s.p]);
+      if (d === '0') { endCall(id); return res.send('go_to_folder=/'); }
+      if (d === '1' || d === '2') {
+        s.driveList = await listDriveMusic(Date.now() + 15000);
+        if (!s.driveList.length) return res.send('id_list_message=t-' + sp('לא נמצאו קבצי שמע בתיקיית גוגל דרייב'));
+        if (d === '1') {
+          s.mm = 'ai';
+          s.sys = buildDriveSys(s.driveList);
+          return res.send(askFor(s, recPre(s)));
+        }
+        s.mm = 'num';
+        return res.send(numPrompt(s, 't-' + MM_NUM_ASK));
+      }
+      return res.send(tapFor(s, 't-' + MM_MENU));
+    }
+    if (s.mm === 'num') {
+      const raw = digitsOf(q[s.p]);
+      if (!raw) { s.mm = 'menu'; return res.send(tapFor(s, 't-' + MM_MENU)); }
+      if (raw === '0') {
+        const listTxt = sp(s.driveList.slice(0, 40).map(x => x.number + ' ' + x.title).join(', '));
+        return res.send(numPrompt(s, 't-' + listTxt + '.' + 't-' + MM_NUM_ASK));
+      }
+      const n = parseInt(raw, 10);
+      const item = (s.driveList || [])[n - 1];
+      if (!item) return res.send(numPrompt(s, 't-' + sp('מספר שיר לא קיים ברשימה. ') + MM_NUM_ASK));
+      const r = await prepareMedia({ n: item.title, u: item.url }, s.d, Date.now() + MEDIA_PREP_MS);
+      const nextMsg = sp('הקש מספר שיר נוסף ובסיום סולמית, או כוכבית לתפריט');
+      return res.send(numPrompt(s, 'f-' + s.d + '/' + r.name + '.t-' + nextMsg));
+    }
+    console.log(id, 'mymusic ai req', s.mode || '-', 'in', JSON.stringify(q[s.p] === undefined ? null : q[s.p]));
+    const out = await turnStep(s, q, id, T0);
+    return res.send(out);
+  } catch (e) {
+    console.error(id, 'mymusic fatal', e.message);
     if (!res.headersSent) res.send('id_list_message=t-' + ERR);
   }
 });
