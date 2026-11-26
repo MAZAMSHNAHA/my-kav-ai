@@ -56,7 +56,7 @@ const sp = s => String(s).replace(/[.\-"'&|,=]/g, ' ').replace(/\s+/g, ' ').trim
 // the user can change the voice or pace by speaking; the model signals it with a tag that the server strips before read-aloud
 const VOICE_CTL = ' אם המשתמש מבקש לשנות את הקול, את קצב הדיבור או את אורך התשובות, התחל את התשובה בתג מתאים ואחריו אשר בקצרה במשפט אחד. התגים: [[VOICE:male]] לקול גברי, [[VOICE:female]] לקול נשי, [[VOICE:default]] לקול הרגיל, [[PACE:slow]] לדיבור לאט, [[PACE:fast]] לדיבור מהר, [[PACE:normal]] לקצב רגיל, [[LEN:short]] כשהמשתמש מבקש תשובות קצרות יותר, למשל: קצר את התשובה, תקצר, תענה קצר, בקצרה, בקיצור, [[LEN:long]] כשהוא מבקש לחזור לתשובות מפורטות או להרחיב. בקשה כזאת מתייחסת תמיד לאורך התשובות שלך ולא לחפץ או לנושא כלשהו, גם כשהיא מופיעה באותו משפט עם שאלה, ואז ענה על השאלה בקצרה. בקשת המשתמש לגבי אורך התשובה גוברת על כל הנחיית אורך אחרת, ולכן כבר בתשובה הזאת עצמה ענה לפי הבקשה החדשה, ואם יש בבקשה גם שאלה ענה עליה. אפשר לשלב כמה תגים. זה היוצא מן הכלל היחיד לכלל הסימנים המיוחדים. השתמש בתגים רק כשהמשתמש ביקש במפורש שינוי כזה, ולעולם אל תזכיר אותם בטקסט אחר.';
 const SEARCH_HINT = ' יש לך כלי חיפוש באינטרנט בשם web_search. הפעל אותו אך ורק אם המשתמש ביקש ממך במפורש לחפש באינטרנט או באתר מסוים, למשל חפש באינטרנט או חפש לי באתר. אם הוא ביקש אתר מסוים, העבר את שמו בשדה site. אם הוא לא ביקש חיפוש במפורש, ענה מהידע שלך בלי להשתמש בכלי, גם אם השאלה עוסקת בחדשות או בעניינים עדכניים ואתה לא בטוח בתשובה, ואז אמור בקצרה שאתה יכול לחפש אם יבקשו. אחרי החיפוש ענה בקצרה בלי להקריא כתובות אתרים.';
-const FOUND_HINT = ' יש לך גם כלי search_media לחיפוש שירים וקבצי שמע ווידאו שאפשר להאזין להם, וכלי play_found להשמעת אחת התוצאות. אם המשתמש ביקש לחפש או לראות שירים או קבצים להשמעה, הפעל search_media עם שאילתה קצרה. אחרי שקיבלת את התוצאות הקרא אותן בקצרה, כל אחת עם מספר במילים ואחריו השם, ושאל איזו לנגן. כשהמשתמש מבקש לנגן אחת מהן, לפי מספר או לפי שם, הפעל play_found עם המספר, ואז אמור משפט קצר אחד שאתה מנגן עכשיו. אל תקריא כתובות.';
+const FOUND_HINT = ' יש לך גם כלי search_media לחיפוש שירים וקבצי שמע ווידאו כשרים שאפשר להאזין להם, וכלי play_found להשמעת אחת התוצאות. אם המשתמש ביקש לחפש או לשמוע שיר, הפעל search_media עם שאילתה קצרה (שם השיר או הזמר). אם החיפוש החזיר nothing found ובשם השיר יש מילה ביידיש או כתיב חלופי (למשל ראטוועט מול ראטעוועט, אידלך מול אידעלעך), נסה שוב פעם אחת עם הכתיב החלופי או עם שם הזמר. אחרי שקיבלת את התוצאות הקרא אותן בקצרה, כל אחת עם מספר במילים ואחריו השם, ושאל איזו לנגן. כשהמשתמש מבקש לנגן אחת מהן, לפי מספר או לפי שם, הפעל play_found עם המספר, ואז אמור משפט קצר אחד שאתה מנגן עכשיו. אל תקריא כתובות.';
 // audio or video files from the internet that the caller can ask to play ("נגן את הקובץ"); the owner lists them in MEDIA_FILES: [{"n":"name","u":"https://.../file.mp3"}]
 let MEDIA = [];
 try { MEDIA = JSON.parse(process.env.MEDIA_FILES || '[]'); } catch (e) { MEDIA = []; }
@@ -483,22 +483,26 @@ const decodeHtml = s => String(s || '').replace(/&#(\d+);/g, (_, n) => String.fr
 async function kcmSearch(query, deadline) {
   const u = new URL('https://kcm.fm/wp-json/wp/v2/posts');
   u.searchParams.set('categories', '1521');
-  u.searchParams.set('per_page', '12');
+  u.searchParams.set('per_page', '15');
   if (query) u.searchParams.set('search', query);
   const r = await http(u.toString(), { headers: { 'User-Agent': 'Mozilla/5.0' } }, 15000, deadline);
   if (!r.ok) throw new Error('kcm ' + r.status);
   const posts = await r.json();
   if (!Array.isArray(posts)) return [];
+  const words = String(query || '').trim().split(/\s+/).filter(Boolean);
   const out = [];
   for (const p of posts) {
     const title = decodeHtml((p && p.title && p.title.rendered) || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 100);
     const audio1 = (p && Array.isArray(p.audios_in_content) && p.audios_in_content[0] && p.audios_in_content[0].audio_file) || '';
     const audio2 = (p && p.acf && p.acf.video_data && p.acf.video_data.video_scr) || '';
     const url = [audio1, audio2].find(x => /^https?:\/\//i.test(String(x || '').trim())) || '';
-    if (title && url) out.push({ title, url: String(url).trim(), src: 'kcm' });
-    if (out.length >= 6) break;
+    if (title && url) {
+      const score = words.reduce((acc, w) => acc + (title.includes(w) ? 1 : 0), 0);
+      out.push({ title, url: String(url).trim(), src: 'kcm', score });
+    }
   }
-  return out;
+  if (words.length) out.sort((a, b) => b.score - a.score);
+  return out.slice(0, 6).map(({ title, url, src }) => ({ title, url, src }));
 }
 async function searchMedia(s, query, deadline, sort) {
   query = String(query || '').trim().slice(0, 200);
@@ -513,26 +517,13 @@ async function searchMedia(s, query, deadline, sort) {
     try {
       s.found = await jamendoSearch(s, query, sort, deadline);
       if (s.found.length) return { results: s.found.map((x, i) => ({ number: i + 1, title: x.title })) };
-      if (!GROQ_KEYS.length) return { error: 'nothing found' };
     } catch (e) {
       if (isBudget(e)) throw e;
       console.error('jamendo search failed:', String(e.message).slice(0, 150));
-      if (!GROQ_KEYS.length) return { error: 'search unavailable' };
     }
   }
-  if (!query || !GROQ_KEYS.length) return { error: 'nothing found' };
-  try {
-    const t = await groqText(MEDIA_JSON_SYS + 'Return up to 6 results for the request. title = the song or file name (with the artist when known), in its original language. url = a direct link to an audio or video file (mp3, m4a, mp4, wav) when you found one, otherwise an empty string.', query, deadline, 35000);
-    const items = parseList(t).map(x => ({ title: String((x && x.title) || '').replace(/\s+/g, ' ').trim().slice(0, 100), url: /^https?:\/\//i.test(String((x && x.url) || '')) ? String(x.url).trim() : '' })).filter(x => x.title);
-    const seen = new Set();
-    s.found = items.filter(x => !seen.has(x.title) && seen.add(x.title)).slice(0, 6);
-    if (!s.found.length) return { error: 'nothing found' };
-    return { results: s.found.map((x, i) => ({ number: i + 1, title: x.title })) };
-  } catch (e) {
-    if (isBudget(e)) throw e;
-    console.error('media search failed:', String(e.message).slice(0, 150));
-    return { error: 'search unavailable' };
-  }
+  s.found = [];
+  return { error: 'nothing found' };
 }
 // direct file links for one title (second search, done only when the caller asked to play it)
 async function findMediaUrls(title, deadline) {
