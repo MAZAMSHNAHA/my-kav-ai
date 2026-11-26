@@ -557,9 +557,10 @@ async function kcmSearch(query, deadline) {
   }
   const words = q.split(/\s+/).filter(w => w.length >= 3);
   if (words.length > 1) {
-    const longest = words.slice().sort((a, b) => b.length - a.length)[0];
-    out = await kcmFetch(longest, deadline);
-    if (out.length) return out;
+    for (const w of [words[0], words[0].replace(/([א-ת])וו/g, '$1עוו'), words.slice().sort((a, b) => b.length - a.length)[0]]) {
+      out = await kcmFetch(w, deadline);
+      if (out.length) return out;
+    }
   }
   return [];
 }
