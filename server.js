@@ -371,6 +371,44 @@ async function searchEmail(s, args, deadline) {
 
 // downloads the file, converts it to a phone wav (8 kHz mono) and uploads it to the extension; a ready file is reused
 const mediaDone = {};
+async function downloadHls(masterUrl, outFile, deadline) {
+  let plUrl = masterUrl;
+  let txt = await (await http(plUrl, { redirect: 'follow' }, 15000, deadline)).text();
+  if (/#EXT-X-STREAM-INF/i.test(txt)) {
+    const lines = txt.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const sub = lines.find(l => !l.startsWith('#'));
+    if (!sub) throw new Error('hls no stream');
+    plUrl = new URL(sub, plUrl).toString();
+    txt = await (await http(plUrl, { redirect: 'follow' }, 15000, deadline)).text();
+  }
+  const mapM = txt.match(/#EXT-X-MAP:URI="([^"]+)"/i);
+  const segs = [];
+  let dur = 0;
+  for (const raw of txt.split(/\r?\n/)) {
+    const l = raw.trim();
+    if (!l) continue;
+    if (l.startsWith('#EXTINF:')) { dur += parseFloat(l.slice(8)) || 0; continue; }
+    if (l.startsWith('#')) continue;
+    segs.push(l);
+    if (dur >= MEDIA_MAX_SEC) break;
+  }
+  if (!segs.length) throw new Error('hls no segments');
+  const urls = (mapM ? [mapM[1]] : []).concat(segs).map(u => new URL(u, plUrl).toString());
+  const bufs = new Array(urls.length);
+  let idx = 0, got = 0;
+  await Promise.all(Array.from({ length: 6 }, async () => {
+    while (idx < urls.length) {
+      const k = idx++;
+      const r = await http(urls[k], { redirect: 'follow' }, 20000, deadline);
+      if (!r.ok) throw new Error('hls seg ' + r.status);
+      const b = Buffer.from(await r.arrayBuffer());
+      got += b.length;
+      if (got > MEDIA_MAX_BYTES) throw new Error('media file too large');
+      bufs[k] = b;
+    }
+  }));
+  fs.writeFileSync(outFile, Buffer.concat(bufs));
+}
 async function prepareMedia(m, d, dl0) {
   const name = 'mf' + crypto.createHash('sha1').update(m.u).digest('hex').slice(0, 12);
   const key = d + '/' + name;
@@ -378,10 +416,8 @@ async function prepareMedia(m, d, dl0) {
   const dl = dl0 || Date.now() + MEDIA_PREP_MS;
   const tmp = path.join(os.tmpdir(), name + '-' + crypto.randomBytes(3).toString('hex'));
   try {
-    let buf;
-    if (FFMPEG && /\.m3u8(\?|$)/i.test(m.u)) {
-      await execFileP(FFMPEG, ['-y', '-v', 'error', '-i', m.u, '-vn', '-t', String(MEDIA_MAX_SEC), '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', tmp + '.wav'], { timeout: Math.max(5000, dl - Date.now()) });
-      buf = fs.readFileSync(tmp + '.wav');
+    if (/\.m3u8(\?|$)/i.test(m.u)) {
+      await downloadHls(m.u, tmp + '.in', dl);
     } else {
       const r = await http(m.u, { redirect: 'follow' }, 60000, dl);
       if (!r.ok) throw new Error('media download ' + r.status);
@@ -397,12 +433,13 @@ async function prepareMedia(m, d, dl0) {
         if (!out.write(value)) await new Promise(res => out.once('drain', res));
       }
       await new Promise((res, rej) => out.end(e => (e ? rej(e) : res())));
-      if (FFMPEG) {
-        await execFileP(FFMPEG, ['-y', '-v', 'error', '-i', tmp + '.in', '-vn', '-t', String(MEDIA_MAX_SEC), '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', tmp + '.wav'], { timeout: Math.max(5000, dl - Date.now()) });
-        buf = fs.readFileSync(tmp + '.wav');
-      } else {
-        buf = fs.readFileSync(tmp + '.in'); // no ffmpeg: Yemot converts the upload itself (works for mp3 and wav)
-      }
+    }
+    let buf;
+    if (FFMPEG) {
+      await execFileP(FFMPEG, ['-y', '-v', 'error', '-i', tmp + '.in', '-vn', '-t', String(MEDIA_MAX_SEC), '-ar', '8000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', tmp + '.wav'], { timeout: Math.max(5000, dl - Date.now()) });
+      buf = fs.readFileSync(tmp + '.wav');
+    } else {
+      buf = fs.readFileSync(tmp + '.in'); // no ffmpeg: Yemot converts the upload itself (works for mp3 and wav)
     }
     await upload(name, buf, dl, d, 60000);
     mediaDone[key] = true;
