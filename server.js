@@ -37,7 +37,12 @@ const gdriveFolderRaw = String(process.env.GDRIVE_FOLDER_ID || '').trim();
 const gdriveFolderM = gdriveFolderRaw.match(/\/folders\/([a-zA-Z0-9_-]+)/);
 const GDRIVE_FOLDER_ID = gdriveFolderM ? gdriveFolderM[1] : gdriveFolderRaw;
 const GDRIVE_API_KEY = String(process.env.GDRIVE_API_KEY || '').trim();
-const HAS_DRIVE = !!(GDRIVE_FOLDER_ID && GDRIVE_API_KEY);
+const GDRIVE_CLIENT_ID = String(process.env.GDRIVE_CLIENT_ID || '').trim();
+const GDRIVE_CLIENT_SECRET = String(process.env.GDRIVE_CLIENT_SECRET || '').trim();
+const GDRIVE_REFRESH_TOKEN = String(process.env.GDRIVE_REFRESH_TOKEN || '').trim();
+const HAS_DRIVE_ALL = !!(GDRIVE_CLIENT_ID && GDRIVE_CLIENT_SECRET && GDRIVE_REFRESH_TOKEN);
+const HAS_DRIVE_FOLDER = !!(GDRIVE_FOLDER_ID && (GDRIVE_API_KEY || HAS_DRIVE_ALL));
+const HAS_DRIVE = HAS_DRIVE_FOLDER || HAS_DRIVE_ALL;
 const MY_MUSIC_RAW = String(process.env.MY_MUSIC_EXT || '3').replace(/^\/+|\/+$/g, '');
 const MUSIC_EXT = MY_MUSIC_RAW ? '/' + MY_MUSIC_RAW : '';
 const TEXT_MODEL = String(process.env.TEXT_MODEL || '').trim() || 'gemini-3.6-flash';
@@ -423,30 +428,80 @@ async function sendEmail(s, args, deadline) {
   }
 }
 
+let driveTok = { token: '', exp: 0 };
+async function getDriveToken(deadline) {
+  if (!HAS_DRIVE_ALL) return '';
+  if (driveTok.token && Date.now() < driveTok.exp - 60000) return driveTok.token;
+  const body = new URLSearchParams({
+    client_id: GDRIVE_CLIENT_ID,
+    client_secret: GDRIVE_CLIENT_SECRET,
+    refresh_token: GDRIVE_REFRESH_TOKEN,
+    grant_type: 'refresh_token'
+  });
+  const r = await http('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() }, 12000, deadline);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.access_token) throw new Error('gdrive oauth ' + r.status + ' ' + String(j.error_description || j.error || '').slice(0, 100));
+  driveTok = { token: j.access_token, exp: Date.now() + (Number(j.expires_in) || 3600) * 1000 };
+  return driveTok.token;
+}
+function mapDriveFiles(files, useAuth) {
+  return (files || [])
+    .filter(f => f && f.id && f.name && (String(f.mimeType || '').startsWith('audio/') || String(f.mimeType || '').startsWith('video/') || /\.(mp3|wav|m4a|ogg|aac|mp4|flac)$/i.test(f.name)))
+    .map((f, idx) => ({
+      number: idx + 1,
+      id: f.id,
+      title: String(f.name).replace(/\.[a-z0-9]{2,5}$/i, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100),
+      url: 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(f.id) + '?alt=media' + (useAuth ? '' : '&key=' + encodeURIComponent(GDRIVE_API_KEY)),
+      driveAuth: !!useAuth
+    }));
+}
 let drivePool = { t: 0, items: [] };
 async function listDriveMusic(deadline) {
-  if (!HAS_DRIVE) return [];
+  if (!HAS_DRIVE_FOLDER) return [];
   if (Date.now() - drivePool.t < 120000 && drivePool.items.length) return drivePool.items;
   const u = new URL('https://www.googleapis.com/drive/v3/files');
   u.searchParams.set('q', `'${GDRIVE_FOLDER_ID}' in parents and trashed = false`);
   u.searchParams.set('fields', 'files(id,name,mimeType,size)');
   u.searchParams.set('orderBy', 'name');
   u.searchParams.set('pageSize', '200');
-  u.searchParams.set('key', GDRIVE_API_KEY);
-  const r = await http(u.toString(), {}, 15000, deadline);
+  const headers = {};
+  if (HAS_DRIVE_ALL) headers.Authorization = 'Bearer ' + await getDriveToken(deadline);
+  else u.searchParams.set('key', GDRIVE_API_KEY);
+  const r = await http(u.toString(), { headers }, 15000, deadline);
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error('gdrive ' + r.status + ' ' + JSON.stringify(j.error || {}).slice(0, 120));
-  const items = (j.files || [])
-    .filter(f => f && f.id && f.name && (String(f.mimeType || '').startsWith('audio/') || String(f.mimeType || '').startsWith('video/') || /\.(mp3|wav|m4a|ogg|aac|mp4|flac)$/i.test(f.name)))
-    .map((f, idx) => ({
-      number: idx + 1,
-      id: f.id,
-      title: String(f.name).replace(/\.[a-z0-9]{2,5}$/i, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100),
-      url: 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(f.id) + '?alt=media&key=' + encodeURIComponent(GDRIVE_API_KEY)
-    }));
+  const items = mapDriveFiles(j.files, HAS_DRIVE_ALL);
   drivePool = { t: Date.now(), items };
   return items;
 }
+async function searchAllDriveMusic(s, query, deadline) {
+  if (!HAS_DRIVE_ALL) return { error: 'full drive search not configured' };
+  const token = await getDriveToken(deadline);
+  const qWords = String(query || '').replace(/['"\\]/g, ' ').trim().split(/\s+/).filter(Boolean).slice(0, 5);
+  const runQ = async words => {
+    let qStr = "trashed = false and (mimeType contains 'audio/' or name contains '.mp3' or name contains '.wav' or name contains '.m4a')";
+    for (const w of words) qStr += ` and name contains '${w}'`;
+    const u = new URL('https://www.googleapis.com/drive/v3/files');
+    u.searchParams.set('q', qStr);
+    u.searchParams.set('fields', 'files(id,name,mimeType,size)');
+    u.searchParams.set('orderBy', 'modifiedTime desc');
+    u.searchParams.set('pageSize', '15');
+    const r = await http(u.toString(), { headers: { Authorization: 'Bearer ' + token } }, 15000, deadline);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error('gdrive ' + r.status + ' ' + JSON.stringify(j.error || {}).slice(0, 120));
+    return mapDriveFiles(j.files, true);
+  };
+  let items = await runQ(qWords);
+  if (!items.length && qWords.length > 1) items = await runQ([qWords[0]]);
+  if (!items.length) { s.driveList = []; return { error: 'nothing found' }; }
+  s.driveList = items.slice(0, 8).map((x, i) => ({ ...x, number: i + 1 }));
+  return { results: s.driveList.map(x => ({ number: x.number, title: x.title })) };
+}
+const DRIVE_SEARCH_DECL = {
+  name: 'search_drive',
+  description: 'Search across ALL audio/MP3 files in the caller personal Google Drive. Call when the user asks to find or play a song from their Drive.',
+  parameters: { type: 'OBJECT', properties: { query: { type: 'STRING', description: 'Optional song or artist name to search in file names; leave empty to list recent audio files' } } }
+};
 const DRIVE_PLAY_DECL = {
   name: 'play_drive',
   description: 'Play a song by its number from the caller personal Google Drive music library.',
@@ -455,11 +510,12 @@ const DRIVE_PLAY_DECL = {
 function startDrive(s, n) {
   const item = ((s && s.driveList) || [])[Number(n) - 1];
   if (!item) return { error: 'no such song number' };
-  s.mediaP = prepareMedia({ n: item.title, u: item.url }, s.d).catch(e => { console.error('drive media failed:', String(e.message).slice(0, 150)); return { error: e.message }; });
+  s.mediaP = prepareMedia({ n: item.title, u: item.url, driveAuth: item.driveAuth }, s.d).catch(e => { console.error('drive media failed:', String(e.message).slice(0, 150)); return { error: e.message }; });
   return { status: 'the song will be played right after your reply', title: item.title };
 }
 const buildDriveSys = list => 'אתה עוזר קולי במאגר השירים האישי של המתקשר. מותר לך להשמיע ולחפש אך ורק מתוך רשימת השירים הבאה מהמאגר שלו (אסור לחפש בשום מקום אחר). כשהמשתמש מבקש שיר, זמר או שואל איזה שירים יש, בדוק ברשימה: אם יש התאמה ברורה, הפעל מיד play_drive עם מספר השיר וענה במשפט קצר אחד שאתה מנגן עכשיו את השיר. אם יש כמה שירים מתאימים, הקרא אותם בקצרה עם מספר במילים ושאל איזה לנגן. אם השיר לא נמצא ברשימה, אמור בקצרה שהוא לא נמצא במאגר האישי. ' +
   TRANSCRIBE_HINT + ' רשימת השירים במאגר: ' + (list.length ? list.map(x => x.number + ' ' + x.title).join(', ') : 'המאגר ריק');
+const buildDriveAllSys = () => 'אתה עוזר קולי שמחפש ומנגן קבצי שמע אך ורק מתוך הגוגל דרייב האישי של המתקשר. יש לך כלי search_drive לחיפוש בכל הדרייב וכלי play_drive להשמעת תוצאה לפי מספר. כשהמתקשר מבקש שיר או שואל מה יש בדרייב, הפעל מיד search_drive (עם מילת חיפוש קצרה, או ריק לשירים אחרונים). אם מצאת תוצאה ברורה אחת אפשר להפעיל מיד play_drive עם מספר 1 ולענות בקצרה שאתה מנגן, ואם יש כמה תוצאות הקרא אותן עם מספר במילים ושאל איזו לנגן. ' + TRANSCRIBE_HINT;
 
 // downloads the file, converts it to a phone wav (8 kHz mono) and uploads it to the extension; a ready file is reused
 const mediaDone = {};
@@ -511,7 +567,9 @@ async function prepareMedia(m, d, dl0) {
     if (/\.m3u8(\?|$)/i.test(m.u)) {
       await downloadHls(m.u, tmp + '.in', dl);
     } else {
-      const r = await http(m.u, { redirect: 'follow' }, 60000, dl);
+      const headers = {};
+      if (m.driveAuth && HAS_DRIVE_ALL) headers.Authorization = 'Bearer ' + await getDriveToken(dl);
+      const r = await http(m.u, { redirect: 'follow', headers }, 60000, dl);
       if (!r.ok) throw new Error('media download ' + r.status);
       if (Number(r.headers.get('content-length') || 0) > MEDIA_MAX_BYTES) throw new Error('media file too large');
       const out = fs.createWriteStream(tmp + '.in');
@@ -760,6 +818,7 @@ async function askModel(sys, contents, deadline, s) {
   const base = { systemInstruction: { parts: [{ text: sys }] } };
   const decls = [];
   if (s && s.mm === 'ai') {
+    if (HAS_DRIVE_ALL) decls.push(DRIVE_SEARCH_DECL);
     decls.push(DRIVE_PLAY_DECL);
   } else {
     if (HAS_SEARCH) decls.push(SEARCH_DECL);
@@ -785,7 +844,10 @@ async function askModel(sys, contents, deadline, s) {
     for (const c of fcalls) {
       const args = c.functionCall.args || {};
       let out;
-      if (c.functionCall.name === 'play_drive') {
+      if (c.functionCall.name === 'search_drive') {
+        console.log('drive search:', String(args.query || '').slice(0, 80));
+        out = await searchAllDriveMusic(s, args.query, deadline);
+      } else if (c.functionCall.name === 'play_drive') {
         console.log('drive play:', String(args.number));
         out = startDrive(s, args.number);
       } else if (c.functionCall.name === 'play_media') {
@@ -1781,14 +1843,21 @@ app.all('/mymusic', async (req, res) => {
     if (s.mm === 'menu') {
       const d = digitsOf(q[s.p]);
       if (d === '0') { endCall(id); return res.send('go_to_folder=/'); }
-      if (d === '1' || d === '2') {
-        s.driveList = await listDriveMusic(Date.now() + 15000);
-        if (!s.driveList.length) return res.send('id_list_message=t-' + sp('לא נמצאו קבצי שמע בתיקיית גוגל דרייב'));
-        if (d === '1') {
+      if (d === '1') {
+        if (HAS_DRIVE_ALL) {
           s.mm = 'ai';
-          s.sys = buildDriveSys(s.driveList);
+          s.sys = buildDriveAllSys();
           return res.send(askFor(s, recPre(s)));
         }
+        s.driveList = await listDriveMusic(Date.now() + 15000);
+        if (!s.driveList.length) return res.send('id_list_message=t-' + sp('לא נמצאו קבצי שמע בתיקיית גוגל דרייב'));
+        s.mm = 'ai';
+        s.sys = buildDriveSys(s.driveList);
+        return res.send(askFor(s, recPre(s)));
+      }
+      if (d === '2') {
+        s.driveList = await listDriveMusic(Date.now() + 15000);
+        if (!s.driveList.length) return res.send('id_list_message=t-' + sp('לא נמצאו קבצי שמע בתיקיית גוגל דרייב'));
         s.mm = 'num';
         return res.send(numPrompt(s, 't-' + MM_NUM_ASK));
       }
