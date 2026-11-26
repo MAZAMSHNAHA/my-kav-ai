@@ -67,7 +67,7 @@ const MEDIA_MAX_SEC = (parseInt(process.env.MEDIA_MAX_MIN, 10) || 20) * 60;
 const MEDIA_MAX_BYTES = (parseInt(process.env.MEDIA_MAX_MB, 10) || 100) * 1048576;
 const MEDIA_PREP_MS = Number(process.env.MEDIA_PREP_MS) || 100000;
 const MEDIA_HINT = ' יש לך קבצי שמע שאפשר להשמיע למתקשר. הפעל את הכלי play_media אך ורק אם המשתמש ביקש במפורש לנגן או להשמיע קובץ, והעבר את מספר הקובץ מהרשימה. אם יש רק קובץ אחד והמשתמש ביקש לנגן את הקובץ, הפעל אותו. הקבצים: ' + MEDIA.map((m, i) => (i + 1) + ' ' + m.n).join(', ') + '. אחרי שהפעלת את הכלי ענה במשפט קצר אחד בלבד שאתה מנגן עכשיו את הקובץ, בלי להקריא כתובות.';
-const EMAIL_HINT = ' יש לך כלי חיפוש במייל האישי של המתקשר בשם search_email. הפעל אותו אך ורק כשהמשתמש מבקש במפורש לבדוק, לחפש או לקרוא מהמייל שלו, למשל מה יש לי במייל, חפש במייל מ..., או האם קיבלתי מייל מ.... ברירת המחדל היא תיבת ראשי (primary); אם המשתמש מבקש במפורש לבדוק בעדכונים, בקידומי מכירות או בכל המייל, העבר category מתאים. אם הכלי מחזיר שגיאה שהמספר לא מורשה, אמור בנימוס שהגישה למייל חסומה למספר זה. אחרי החיפוש סכם בקצרה ובשפה ברורה את המיילים שנמצאו (מהחדש לישן): שולח, נושא, תאריך ותמצית התוכן, בלי להקריא כתובות מייל ארוכות או קישורים טכניים אלא אם התבקשת.';
+const EMAIL_HINT = ' יש לך כלי חיפוש במייל האישי של המתקשר בשם search_email. הפעל אותו אך ורק אם המשתמש ביקש ממך במפורש לחפש או לבדוק במייל, למשל חפש במייל, תחפש במייל, בדוק במייל, תבדוק במייל או מה יש במייל. אם הוא לא ביקש במפורש לבדוק או לחפש במייל, אל תפעיל את הכלי, ענה מהידע שלך ואמור בקצרה שאתה יכול לבדוק במייל אם יבקשו. ברירת המחדל היא תיבת ראשי (primary); אם המשתמש ביקש במפורש לבדוק בעדכונים, בקידומי מכירות או בכל המייל, העבר category מתאים. אם הכלי מחזיר שגיאה שהמספר לא מורשה, אמור בנימוס שהגישה למייל חסומה למספר זה. אחרי החיפוש סכם בקצרה ובשפה ברורה את המיילים שנמצאו (מהחדש לישן): שולח, נושא, תאריך ותמצית התוכן, בלי להקריא כתובות מייל ארוכות או קישורים טכניים אלא אם התבקשת.';
 // history is kept as text only, so a recorded question needs a transcript: the model adds it as a tag that the server strips
 const TRANSCRIBE_HINT = ' אם השאלה הגיעה כהקלטה קולית, התחל את התשובה בתג [[Q:תמלול מדויק של השאלה במילים]] ואחריו התשובה עצמה. לשאלה שהוקלדה אל תוסיף את התג. לעולם אל תזכיר את התג בטקסט אחר.';
 // detailed answers like Gemini: whatever MAX_WORDS says, the limit is never lower than 500 words
@@ -265,7 +265,7 @@ const MEDIA_DECL = {
 
 const EMAIL_SEARCH_DECL = {
   name: 'search_email',
-  description: 'Search or read recent emails from the caller personal IMAP mailbox. Call ONLY when the user explicitly asks to check, search, or read their email.',
+  description: 'Search or read recent emails from the caller personal IMAP mailbox. Call ONLY when the user explicitly says to search or check their email (e.g. "חפש במייל", "בדוק במייל").',
   parameters: {
     type: 'OBJECT',
     properties: {
