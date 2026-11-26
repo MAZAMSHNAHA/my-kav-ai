@@ -1042,6 +1042,7 @@ async function turnStep(s, q, id, T0) {
     const d = digitsOf(q[s.p]);
     if (d === '1') { s.miss = 0; return askFor(s, recPre(s)); }
     if (d === '2') { s.miss = 0; s.buf = ''; const help = s.kbSeen ? KB_SHORT : KB_START; s.kbSeen = true; return kbAsk(s, 't-' + help); }
+    if (d === '9' && HD) { endCall(id); return 'go_to_folder=' + HD; }
     s.miss = (s.miss || 0) + 1;
     if (s.miss >= 3) return 'id_list_message=t-' + sp('להתראות');
     return tapAny(s, 't-' + sp(d ? 'המקש לא מוכר' : 'לא התקבלה בחירה'));
