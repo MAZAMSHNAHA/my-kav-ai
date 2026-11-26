@@ -1760,7 +1760,7 @@ const MM_NUM_ASK = sp('הקש את מספר השיר ובסיום סולמית. 
 const numPrompt = (s, pre) => {
   s.n++;
   s.p = 'N' + s.e + s.n;
-  return 'read=' + pre + '=' + s.p + ',no,3,1,15,No,no,no,*,Ok,None';
+  return 'read=' + pre + '=' + s.p + ',no,3,1,15' + TAP_EMPTY;
 };
 app.all('/mymusic', async (req, res) => {
   const q = { ...req.query, ...req.body };
