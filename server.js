@@ -517,9 +517,9 @@ async function jamendoSearch(s, query, sort, deadline) {
   return (j.results || []).filter(x => x && x.audio).map(x => ({ title: (String(x.name || '') + (x.artist_name ? ' - ' + x.artist_name : '')).replace(/\s+/g, ' ').trim().slice(0, 100), url: String(x.audio), src: 'jamendo' })).filter(x => x.title);
 }
 const decodeHtml = s => String(s || '').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n))).replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#038;/g, '&');
-async function kcmFetch(query, deadline) {
+async function kcmFetch(query, deadline, allCats) {
   const u = new URL('https://kcm.fm/wp-json/wp/v2/posts');
-  u.searchParams.set('categories', '1521');
+  if (!allCats) u.searchParams.set('categories', '1521');
   u.searchParams.set('per_page', '15');
   if (query) u.searchParams.set('search', query);
   const r = await http(u.toString(), { headers: { 'User-Agent': 'Mozilla/5.0' } }, 15000, deadline);
@@ -535,11 +535,46 @@ async function kcmFetch(query, deadline) {
     const url = [audio1, audio2].find(x => /^https?:\/\//i.test(String(x || '').trim())) || '';
     if (title && url) {
       const score = words.reduce((acc, w) => acc + (title.includes(w) ? 1 : 0), 0);
+      if (allCats && words.length && score === 0) continue;
       out.push({ title, url: String(url).trim(), src: 'kcm', score });
     }
   }
   if (words.length) out.sort((a, b) => b.score - a.score);
   return out.slice(0, 6).map(({ title, url, src }) => ({ title, url, src }));
+}
+const skel = s => String(s || '').replace(/[אעיו״׳"'`.,!?-]/g, '').replace(/(.)\1+/g, '$1');
+let kcmPool = { t: 0, items: [] };
+async function kcmRecentPool(deadline) {
+  if (Date.now() - kcmPool.t < 900000 && kcmPool.items.length) return kcmPool.items;
+  const items = [];
+  for (const page of [1, 2]) {
+    const u = 'https://kcm.fm/wp-json/wp/v2/posts?categories=1521&per_page=100&page=' + page;
+    const r = await http(u, { headers: { 'User-Agent': 'Mozilla/5.0' } }, 15000, deadline);
+    if (!r.ok) break;
+    const posts = await r.json();
+    if (!Array.isArray(posts) || !posts.length) break;
+    for (const p of posts) {
+      const title = decodeHtml((p && p.title && p.title.rendered) || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 100);
+      const audio1 = (p && Array.isArray(p.audios_in_content) && p.audios_in_content[0] && p.audios_in_content[0].audio_file) || '';
+      const audio2 = (p && p.acf && p.acf.video_data && p.acf.video_data.video_scr) || '';
+      const url = [audio1, audio2].find(x => /^https?:\/\//i.test(String(x || '').trim())) || '';
+      if (title && url) items.push({ title, url: String(url).trim(), src: 'kcm', titleSkel: skel(title) });
+    }
+  }
+  if (items.length) kcmPool = { t: Date.now(), items };
+  return kcmPool.items;
+}
+async function kcmFuzzy(q, deadline) {
+  const keys = q.split(/\s+/).map(skel).filter(k => k.length >= 2);
+  if (!keys.length) return [];
+  const pool = await kcmRecentPool(deadline);
+  const scored = [];
+  for (const it of pool) {
+    const score = keys.reduce((acc, k) => acc + (it.titleSkel.includes(k) ? 1 : 0), 0);
+    if (score > 0) scored.push({ title: it.title, url: it.url, src: it.src, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, 6).map(({ title, url, src }) => ({ title, url, src }));
 }
 const cleanSongQuery = q => String(q || '').replace(/(?:^|\s)(השיר|שיר|הניגון|ניגון|הקליפ|קליפ|של|את)(?=\s|$)/g, ' ').replace(/\s+/g, ' ').trim();
 async function kcmSearch(query, deadline) {
@@ -562,7 +597,9 @@ async function kcmSearch(query, deadline) {
       if (out.length) return out;
     }
   }
-  return [];
+  out = await kcmFuzzy(q, deadline);
+  if (out.length) return out;
+  return kcmFetch(q, deadline, true);
 }
 async function searchMedia(s, query, deadline, sort) {
   query = String(query || '').trim().slice(0, 200);
